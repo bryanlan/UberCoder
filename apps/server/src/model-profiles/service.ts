@@ -35,10 +35,10 @@ export function composeRerouteTask(input: { prompt: string; assistantReply?: str
   return parts.join('\n\n').slice(0, ROUTE_TASK_MAX_CHARS);
 }
 
-const ROUTER_PROVIDER: Record<ProviderId, 'openai' | 'anthropic' | 'xai' | 'mistral'> = {
-  codex: 'openai', claude: 'anthropic', grok: 'xai', vibe: 'mistral',
+const ROUTER_PROVIDER: Record<ProviderId, 'openai' | 'anthropic' | 'xai' | 'mistral' | 'google'> = {
+  codex: 'openai', claude: 'anthropic', grok: 'xai', vibe: 'mistral', antigravity: 'google',
 };
-const ROUTER_VENDORS = ['openai', 'anthropic', 'xai', 'mistral'] as const;
+const ROUTER_VENDORS = ['openai', 'anthropic', 'xai', 'mistral', 'google'] as const;
 
 /** The Console provider that runs a router vendor's models, or undefined for a vendor the Console has no provider for. */
 export function providerForRouterVendor(vendor: string | null | undefined): ProviderId | undefined {
@@ -93,6 +93,7 @@ const profilesSchema = z.object({
     claude: providerSchema,
     grok: providerSchema,
     vibe: providerSchema.optional(),
+    antigravity: providerSchema.optional(),
   }),
 });
 
@@ -259,6 +260,11 @@ export class ModelProfileService {
       throw new ModelProfilesUnavailableError(`wo profiles lists ${vibe.provider} models for vibe`);
     }
     providers.vibe = { routerProvider: 'mistral', levels: vibe ? levelsOf(vibe) : {} };
+    const antigravity = parsed.profiles.antigravity;
+    if (antigravity && antigravity.provider !== 'google') {
+      throw new ModelProfilesUnavailableError(`wo profiles lists ${antigravity.provider} models for antigravity`);
+    }
+    providers.antigravity = { routerProvider: 'google', levels: antigravity ? levelsOf(antigravity) : {} };
     const profiles: ModelProfilesResponse = { providers, loadedAt: new Date(this.now()).toISOString() };
     this.cached = { profiles, at: this.now() };
     return profiles;
@@ -378,12 +384,13 @@ export function fallbackDecision(reason: string, medium: ModelProfileEntry | und
   };
 }
 
-type ProfiledRow = Pick<BoundSession, 'provider' | 'codexProfile' | 'claudeProfile' | 'grokProfile' | 'vibeProfile' | 'autoRoute'>;
+type ProfiledRow = Pick<BoundSession, 'provider' | 'codexProfile' | 'claudeProfile' | 'grokProfile' | 'vibeProfile' | 'antigravityProfile' | 'autoRoute'>;
 
-export function rowProfile(session: Pick<BoundSession, 'provider' | 'codexProfile' | 'claudeProfile' | 'grokProfile' | 'vibeProfile'>): ModelProfileKey | undefined {
+export function rowProfile(session: Pick<BoundSession, 'provider' | 'codexProfile' | 'claudeProfile' | 'grokProfile' | 'vibeProfile' | 'antigravityProfile'>): ModelProfileKey | undefined {
   if (session.provider === 'codex') return session.codexProfile;
   if (session.provider === 'grok') return session.grokProfile;
   if (session.provider === 'vibe') return session.vibeProfile;
+  if (session.provider === 'antigravity') return session.antigravityProfile;
   return session.claudeProfile;
 }
 

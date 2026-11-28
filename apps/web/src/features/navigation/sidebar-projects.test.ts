@@ -52,6 +52,7 @@ function project({
       claude: { id: 'claude', label: 'Claude', conversations: claude },
       grok: { id: 'grok', label: 'Grok', conversations: grok },
       vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
+      antigravity: { id: 'antigravity', label: 'Antigravity', conversations: [] },
     },
   };
 }

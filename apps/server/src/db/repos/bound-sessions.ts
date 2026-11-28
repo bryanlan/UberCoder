@@ -41,10 +41,10 @@ export class BoundSessionsRepo {
     const tx = this.sqlite.transaction(() => {
       this.sqlite.prepare(`
         insert into bound_sessions (
-          id, provider, codex_profile, claude_profile, grok_profile, vibe_profile, project_slug, conversation_ref, resume_conversation_ref, tmux_session_name, transport, status, should_restore, title,
+          id, provider, codex_profile, claude_profile, grok_profile, vibe_profile, antigravity_profile, project_slug, conversation_ref, resume_conversation_ref, tmux_session_name, transport, status, should_restore, title,
           started_at, updated_at, last_activity_at, last_output_at, last_completed_at, last_response_at, auto_tracked_at, is_working, pid, raw_log_path, event_log_path
         ) values (
-          @id, @provider, @codex_profile, @claude_profile, @grok_profile, @vibe_profile, @project_slug, @conversation_ref, @resume_conversation_ref, @tmux_session_name, 'structured', @status, @should_restore, @title,
+          @id, @provider, @codex_profile, @claude_profile, @grok_profile, @vibe_profile, @antigravity_profile, @project_slug, @conversation_ref, @resume_conversation_ref, @tmux_session_name, 'structured', @status, @should_restore, @title,
           @started_at, @updated_at, @last_activity_at, @last_output_at, @last_completed_at, @last_response_at, @auto_tracked_at, @is_working, @pid, null, @event_log_path
         )
         on conflict(id) do update set
@@ -64,6 +64,10 @@ export class BoundSessionsRepo {
           vibe_profile = case
             when excluded.updated_at >= bound_sessions.updated_at then excluded.vibe_profile
             else bound_sessions.vibe_profile
+          end,
+          antigravity_profile = case
+            when excluded.updated_at >= bound_sessions.updated_at then excluded.antigravity_profile
+            else bound_sessions.antigravity_profile
           end,
           resume_conversation_ref = excluded.resume_conversation_ref,
           status = excluded.status,
@@ -88,6 +92,7 @@ export class BoundSessionsRepo {
         claude_profile: session.claudeProfile ?? null,
         grok_profile: session.grokProfile ?? null,
         vibe_profile: session.vibeProfile ?? null,
+        antigravity_profile: session.antigravityProfile ?? null,
         project_slug: session.projectSlug,
         conversation_ref: session.conversationRef,
         resume_conversation_ref: resumeConversationRef ?? null,
@@ -430,10 +435,11 @@ export class BoundSessionsRepo {
 }
 
 /** The column a provider's model profile is stored in. */
-function profileColumn(provider: BoundSession['provider']): 'codex_profile' | 'claude_profile' | 'grok_profile' | 'vibe_profile' {
+function profileColumn(provider: BoundSession['provider']): 'codex_profile' | 'claude_profile' | 'grok_profile' | 'vibe_profile' | 'antigravity_profile' {
   if (provider === 'codex') return 'codex_profile';
   if (provider === 'grok') return 'grok_profile';
   if (provider === 'vibe') return 'vibe_profile';
+  if (provider === 'antigravity') return 'antigravity_profile';
   return 'claude_profile';
 }
 
@@ -446,6 +452,7 @@ export function mapBoundSessionRow(row: SqliteRow): BoundSession {
     claudeProfile: optionalString(row.claude_profile) as BoundSession['claudeProfile'],
     grokProfile: optionalString(row.grok_profile) as BoundSession['grokProfile'],
     vibeProfile: optionalString(row.vibe_profile) as BoundSession['vibeProfile'],
+    antigravityProfile: optionalString(row.antigravity_profile) as BoundSession['antigravityProfile'],
     autoRoute: typeof row.auto_route_json === 'string' ? JSON.parse(row.auto_route_json) as AutoRoute : undefined,
     modelProfileRequest: row.model_profile_request_json
       ? JSON.parse(String(row.model_profile_request_json)) as BoundSession['modelProfileRequest']

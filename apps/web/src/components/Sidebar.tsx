@@ -1,4 +1,4 @@
-import { Bot, Check, FolderTree, GripVertical, Link as LinkIcon, LoaderCircle, Menu, Pencil, Play, Plus, RefreshCcw, Search, Sparkles, Wind, X, Zap } from 'lucide-react';
+import { Bot, Check, FolderTree, GripVertical, Link as LinkIcon, LoaderCircle, Menu, Orbit, Pencil, Play, Plus, RefreshCcw, Search, Sparkles, Wind, X, Zap } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 import { PROVIDERS, PROVIDER_NAMES, type ConversationSearchResult, type FixedModelProfileKey, type ProjectSummary, type ProviderId, type RunFailure, type TreeResponse } from '@agent-console/shared';
 import clsx from 'clsx';
@@ -736,6 +736,21 @@ function ProjectSection({
                     >
                       <Wind className="h-3.5 w-3.5 text-sky-300" />
                       {creatingConversationKey === `${project.slug}:vibe` ? 'Starting Mistral Vibe…' : 'New Mistral Vibe conversation'}
+                    </button>
+                  )}
+                  {enabledProviders.includes('antigravity') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        onClose();
+                        onNewConversation(project.slug, 'antigravity');
+                      }}
+                      disabled={creatingAnyConversation}
+                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Orbit className="h-3.5 w-3.5 text-sky-300" />
+                      {creatingConversationKey === `${project.slug}:antigravity` ? 'Starting Antigravity…' : 'New Antigravity conversation'}
                     </button>
                   )}
                   {project.allowedLocalhostPorts.length > 0 && (

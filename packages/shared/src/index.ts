@@ -1,6 +1,6 @@
 export * from './coordination.js';
 export * from './workers.js';
-export const PROVIDERS = ['codex', 'claude', 'grok', 'vibe'] as const;
+export const PROVIDERS = ['codex', 'claude', 'grok', 'vibe', 'antigravity'] as const;
 export type ProviderId = (typeof PROVIDERS)[number];
 
 /**
@@ -37,7 +37,7 @@ export interface ModelProfileEntry {
 
 export interface ProviderModelProfiles {
   /** The vendor behind the provider, as the router names it. */
-  routerProvider: 'openai' | 'anthropic' | 'xai' | 'mistral';
+  routerProvider: 'openai' | 'anthropic' | 'xai' | 'mistral' | 'google';
   /** The levels this provider has a model for. A missing level cannot be chosen for it. */
   levels: Partial<Record<FixedModelProfileKey, ModelProfileEntry>>;
 }
@@ -115,7 +115,7 @@ const AUTO_QUOTA_WORDS: Record<string, string> = {
 };
 
 /** The plain name of each provider, as the profile line and status text say it. */
-export const PROVIDER_NAMES: Record<ProviderId, string> = { codex: 'Codex', claude: 'Claude', grok: 'Grok', vibe: 'Mistral Vibe' };
+export const PROVIDER_NAMES: Record<ProviderId, string> = { codex: 'Codex', claude: 'Claude', grok: 'Grok', vibe: 'Mistral Vibe', antigravity: 'Antigravity' };
 
 /** A short model name for the one-line display: `Claude Sonnet 5.5` becomes `Sonnet 5.5`. */
 export function shortModelLabel(label: string): string {
@@ -170,6 +170,11 @@ export function visibleModelMatchesTarget(provider: ProviderId, target: ModelTar
   }
   if (provider === 'vibe') {
     const observed = visibleModel.trim().toLowerCase().match(/^(glm-5-3|zai-glm-5-3-flash|mistral-large-4-0-3|mistral-medium-3\.5)(?:\s+(low|high|max))?$/);
+    if (!observed) return undefined;
+    return observed[1] === target.model.toLowerCase() && (!observed[2] || observed[2] === target.effort.toLowerCase());
+  }
+  if (provider === 'antigravity') {
+    const observed = visibleModel.trim().toLowerCase().match(/^(gemini-[\w.-]+?)(?:[\s-]+(default|low|medium|high|xhigh))?$/);
     if (!observed) return undefined;
     return observed[1] === target.model.toLowerCase() && (!observed[2] || observed[2] === target.effort.toLowerCase());
   }
@@ -406,6 +411,7 @@ export interface BoundSession {
   claudeProfile?: ModelProfileKey;
   grokProfile?: ModelProfileKey;
   vibeProfile?: ModelProfileKey;
+  antigravityProfile?: ModelProfileKey;
   /** Present while the profile is `auto`. */
   autoRoute?: AutoRoute;
   modelProfileRequest?: ModelProfileRequest;

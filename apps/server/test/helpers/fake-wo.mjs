@@ -37,6 +37,11 @@ const LEVELS = {
     medium: { ...at('glm-5.3', 'GLM-5.3', 'high'), launch_name: 'glm-5-3' },
     low: { ...at('glm-5.3-flash', 'GLM-5.3 Flash', 'high'), launch_name: 'zai-glm-5-3-flash' },
   },
+  google: {
+    high: at('gemini-4-neon', 'Gemini 4 Neon', 'high'),
+    medium: at('gemini-4-hydrogen', 'Gemini 4 Hydrogen', 'high'),
+    low: at('gemini-3.8-flash', 'Gemini 3.8 Flash', 'high'),
+  },
 };
 
 const args = process.argv.slice(2);
@@ -51,6 +56,7 @@ else if (args[0] === 'profiles') {
     claude: { provider: 'anthropic', levels: LEVELS.anthropic },
     grok: { provider: 'xai', levels: LEVELS.xai },
     vibe: { provider: 'mistral', levels: LEVELS.mistral },
+    antigravity: { provider: 'google', levels: LEVELS.google },
   } }));
 } else if (args[0] === 'route') {
   const provider = args[args.indexOf('--provider') + 1];
@@ -87,6 +93,7 @@ function routeRole(vendor, providerFilter, requestedEffort) {
     anthropic: ['claude-sonnet-5-5', 'Claude Sonnet 5.5'],
     xai: ['grok-4.7', 'Grok 4.7'],
     mistral: ['glm-5.3', 'GLM-5.3'],
+    google: ['gemini-4-hydrogen', 'Gemini 4 Hydrogen'],
   };
   const [model, label] = models[vendor];
   process.stdout.write(JSON.stringify({

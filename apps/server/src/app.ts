@@ -14,6 +14,7 @@ import { ProviderRegistry } from './providers/registry.js';
 import { createClaudePlugin } from './providers/transport/claude/index.js';
 import { createGrokPlugin } from './providers/transport/grok/index.js';
 import { createVibePlugin } from './providers/transport/vibe/index.js';
+import { createAntigravityPlugin } from './providers/transport/antigravity/index.js';
 import { createCodexAppServerPlugin } from './providers/transport/codex/index.js';
 import { createLineTransportFactory } from './providers/transport/line-transport.js';
 import { TransportPluginRegistry } from './providers/transport/registry.js';
@@ -96,6 +97,7 @@ export async function buildApp(options: AppOptions = {}) {
     transportPlugins.register(createClaudePlugin());
     transportPlugins.register(createGrokPlugin());
     transportPlugins.register(createVibePlugin());
+    transportPlugins.register(createAntigravityPlugin());
   }
   // Provider processes run behind session hosts that outlive this process, so a restart reconnects to them. Injected (test) plugins bring their own transport.
   const lineTransport = options.transportPlugins ? undefined : createLineTransportFactory({
@@ -123,6 +125,7 @@ export async function buildApp(options: AppOptions = {}) {
       claude: config.structuredSessions.claude,
       grok: config.structuredSessions.grok,
       vibe: config.structuredSessions.vibe,
+      antigravity: config.structuredSessions.antigravity,
     },
     lineTransport,
     // A message attaches only the pasted images the image store holds, found directly in this directory.

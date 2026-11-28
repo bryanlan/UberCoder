@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { createCoordinationSchema, retireCoordinationEnforcement } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 26;
+export const CURRENT_SCHEMA_VERSION = 27;
 
 /** Shared by migration 26's partial index and the flush query: SQLite uses the index only when the query repeats this text. */
 export const BLOCKED_SUPERVISOR_HANDOFF_SQL = "key>='supervisor-handoff:' and key<'supervisor-handoff;' and json_extract(value,'$.blockedReason') is not null";
@@ -369,6 +369,10 @@ const MIGRATIONS: Migration[] = [
       on bound_sessions(project_slug, provider, conversation_ref)`);
     if (tableExists(sqlite, 'meta')) sqlite.exec(`create index if not exists meta_blocked_supervisor_handoffs on meta(key)
       where ${BLOCKED_SUPERVISOR_HANDOFF_SQL}`);
+  } },
+  { version: 27, name: 'antigravity-cost-profile', up(sqlite) {
+    // The model profile of an Antigravity session, beside the other providers' profile columns.
+    if (tableExists(sqlite, 'bound_sessions')) addColumnIfMissing(sqlite, 'bound_sessions', 'antigravity_profile', 'antigravity_profile text');
   } },
 ];
 

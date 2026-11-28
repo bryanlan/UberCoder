@@ -50,6 +50,12 @@
       "command": ["vibe-acp"],
       "idleUnloadMinutes": 60,
       "env": {}
+    },
+    "antigravity": {
+      "enabled": true,
+      "command": ["agy", "acp", "--stdio", "--dangerously-skip-permissions"],
+      "idleUnloadMinutes": 60,
+      "env": {}
     }
   },
   "modelRouting": {
@@ -84,6 +90,10 @@
     "vibe": {
       "enabled": true,
       "discoveryRoot": "~/.vibe"
+    },
+    "antigravity": {
+      "enabled": true,
+      "discoveryRoot": "~/.gemini/antigravity-cli"
     }
   },
   "projects": {

@@ -67,14 +67,16 @@ export function profilePatch(provider: ProviderId, profile: ModelProfileKey | un
   if (provider === 'codex') return { codexProfile: profile };
   if (provider === 'grok') return { grokProfile: profile };
   if (provider === 'vibe') return { vibeProfile: profile };
+  if (provider === 'antigravity') return { antigravityProfile: profile };
   return { claudeProfile: profile };
 }
 
 /** The profile a bind asked for, from the field that belongs to the provider. */
-function requestedProfileOf(providerId: ProviderId, input: { codexProfile?: ModelProfileKey; claudeProfile?: ModelProfileKey; grokProfile?: ModelProfileKey; vibeProfile?: ModelProfileKey }): ModelProfileKey | undefined {
+function requestedProfileOf(providerId: ProviderId, input: { codexProfile?: ModelProfileKey; claudeProfile?: ModelProfileKey; grokProfile?: ModelProfileKey; vibeProfile?: ModelProfileKey; antigravityProfile?: ModelProfileKey }): ModelProfileKey | undefined {
   if (providerId === 'codex') return input.codexProfile;
   if (providerId === 'grok') return input.grokProfile;
   if (providerId === 'vibe') return input.vibeProfile;
+  if (providerId === 'antigravity') return input.antigravityProfile;
   return input.claudeProfile;
 }
 
@@ -1445,6 +1447,7 @@ export class SessionManager {
     claudeProfile?: ModelProfileKey;
     grokProfile?: ModelProfileKey;
     vibeProfile?: ModelProfileKey;
+    antigravityProfile?: ModelProfileKey;
     /**
      * A structured chat started with a routing already made (the provider-neutral Start): the session starts on this Auto decision,
      * runs on its model from the first turn, and the initial prompt is not routed again. Needs the provider's `auto` profile.
@@ -2812,8 +2815,8 @@ export class SessionManager {
     } catch (error) {
       if (this.inputQueue.get(sessionId, record.requestId)?.state !== 'submitting') return;
       if (error instanceof StructuredBusyError || error instanceof PreviousTurnActiveError) {
-        // Keep the message durable before interrupting a Grok turn that cannot take a native steer.
-        const stopsForReply = session.provider === 'grok' || session.provider === 'vibe';
+        // Keep the message durable before interrupting an ACP turn that cannot take a native steer.
+        const stopsForReply = session.provider === 'grok' || session.provider === 'vibe' || session.provider === 'antigravity';
         this.saveQueuedInput(sessionId, { ...record, notSentSince: undefined, reason: error instanceof StructuredBusyError
           ? stopsForReply ? 'Stopping the current turn to deliver your reply.' : 'Waiting for the running turn to finish.'
           : 'Waiting for the session to accept the message.' });
@@ -2825,7 +2828,9 @@ export class SessionManager {
             // the browser, which could restore and resubmit the same draft while this durable copy is still pending.
             this.logger?.warn({ err: interruptError, sessionId }, session.provider === 'grok'
               ? 'Grok interruption for a queued reply will be retried.'
-              : 'Mistral Vibe interruption for a queued reply will be retried.');
+              : session.provider === 'antigravity'
+                ? 'Antigravity interruption for a queued reply will be retried.'
+                : 'Mistral Vibe interruption for a queued reply will be retried.');
             this.saveQueuedInput(sessionId, { ...record, notSentSince: undefined,
               reason: 'Could not stop the current turn yet. Your reply is saved and will be retried.' });
           }

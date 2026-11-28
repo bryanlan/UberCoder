@@ -35,6 +35,7 @@ const readyProfiles: ModelProfilesState = {
         low: level('grok-build-low', 'Grok Build Low', 'low'),
       } },
       vibe: { routerProvider: 'mistral', levels: {} },
+      antigravity: { routerProvider: 'google', levels: {} },
     },
   },
 };
@@ -142,6 +143,7 @@ function project(): ProjectSummary {
       claude: { id: 'claude', label: 'Claude', conversations: [] },
       grok: { id: 'grok', label: 'Grok', conversations: [] },
       vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
+      antigravity: { id: 'antigravity', label: 'Antigravity', conversations: [] },
     },
   };
 }

@@ -14,6 +14,7 @@ import type { TransportPluginRegistry } from '../../providers/transport/registry
 import { hostIdFor as claudeHostId } from '../../providers/transport/claude/claude-instance.js';
 import { grokLaunchKey, grokTurnKey, hostIdFor as grokHostId } from '../../providers/transport/grok/grok-instance.js';
 import { hostIdFor as vibeHostId, vibeLaunchKey, vibeTurnKey } from '../../providers/transport/vibe/index.js';
+import { antigravityLaunchKey, antigravityTurnKey, hostIdFor as antigravityHostId } from '../../providers/transport/antigravity/index.js';
 import { hostPaths, terminateHost } from '../../providers/transport/line-transport.js';
 import {
   NotSentError,
@@ -163,6 +164,7 @@ const PER_SESSION_HOSTS: Partial<Record<ProviderId, { hostId(sessionId: string):
   // Grok keeps its running-turn record where Claude keeps its record of completed turns: both go when the conversation ends.
   grok: { hostId: grokHostId, launchKey: grokLaunchKey, turnsKey: grokTurnKey, hostPrefix: 'grok-' },
   vibe: { hostId: vibeHostId, launchKey: vibeLaunchKey, turnsKey: vibeTurnKey, hostPrefix: 'vibe-' },
+  antigravity: { hostId: antigravityHostId, launchKey: antigravityLaunchKey, turnsKey: antigravityTurnKey, hostPrefix: 'antigravity-' },
 };
 
 interface LoadedSession {
@@ -205,6 +207,7 @@ function providerLabel(provider: ProviderId): string {
   if (provider === 'codex') return 'Codex (app-server)';
   if (provider === 'grok') return 'Grok (ACP)';
   if (provider === 'vibe') return 'Mistral Vibe (ACP)';
+  if (provider === 'antigravity') return 'Antigravity (ACP)';
   return 'Claude (structured)';
 }
 
@@ -651,10 +654,10 @@ export class StructuredSessionService {
     return { turnId: await this.startTurn(state, input), mode: 'turn' };
   }
 
-  /** A durably queued Grok or Vibe correction stops the old turn once; its reply waits for the terminal before starting a new one. */
+  /** A durably queued Grok, Vibe or Antigravity correction stops the old turn once; its reply waits for the terminal before starting a new one. */
   async interruptForQueuedReply(session: Pick<BoundSession, 'id'>): Promise<void> {
     const state = this.sessions.get(session.id);
-    if ((state?.provider !== 'grok' && state?.provider !== 'vibe') || !state.activeTurnId || state.pendingInterrupt?.turnId === state.activeTurnId) return;
+    if ((state?.provider !== 'grok' && state?.provider !== 'vibe' && state?.provider !== 'antigravity') || !state.activeTurnId || state.pendingInterrupt?.turnId === state.activeTurnId) return;
     // This is not the person's Stop action: it must preserve the input queue and its revision.
     await this.interrupt(session);
   }

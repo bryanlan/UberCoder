@@ -26,6 +26,7 @@ function project(conversations: ProjectSummary['providers']['codex']['conversati
       claude: { id: 'claude', label: 'Claude', conversations: [] },
       grok: { id: 'grok', label: 'Grok', conversations: [] },
       vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
+      antigravity: { id: 'antigravity', label: 'Antigravity', conversations: [] },
     },
   };
 }

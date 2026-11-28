@@ -4,6 +4,7 @@ import { parseClaudeConversationFile } from '../providers/transcripts/claude.js'
 import { parseCodexConversationFile } from '../providers/transcripts/codex.js';
 import { parseGrokConversationFile } from '../providers/transcripts/grok.js';
 import { parseVibeConversationFile } from '../providers/transcripts/vibe.js';
+import { parseAntigravityConversationFile } from '../providers/transcripts/antigravity.js';
 import type { ProviderConversation } from '../providers/types.js';
 
 interface CachedProviderConversation {
@@ -123,7 +124,9 @@ export async function loadProviderConversationFromSummary(
             ? await parseGrokConversationFile(parseInput)
             : summary.provider === 'vibe'
               ? await parseVibeConversationFile(parseInput)
-              : await parseCodexConversationFile(parseInput);
+              : summary.provider === 'antigravity'
+                ? await parseAntigravityConversationFile(parseInput)
+                : await parseCodexConversationFile(parseInput);
 
         const conversation: ProviderConversation = {
           summary: parsed.summary,

@@ -33,6 +33,7 @@ function buildConfig(overrides: Partial<AppConfig['security']> = {}): AppConfig 
       claude: { enabled: false, command: ['claude'], idleUnloadMinutes: 60, env: {} },
       grok: { enabled: false, command: ['grok'], idleUnloadMinutes: 60, env: {} },
       vibe: { enabled: false, command: ['vibe-acp'], idleUnloadMinutes: 60, env: {} },
+      antigravity: { enabled: false, command: ['agy', 'acp', '--stdio', '--dangerously-skip-permissions'], idleUnloadMinutes: 60, env: {} },
     },
     security: {
       passwordHash: 'scrypt:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
@@ -61,6 +62,10 @@ function buildConfig(overrides: Partial<AppConfig['security']> = {}): AppConfig 
       vibe: {
         enabled: false,
         discoveryRoot: '/tmp/agent-console-auth-no-vibe',
+      },
+      antigravity: {
+        enabled: false,
+        discoveryRoot: '/tmp/agent-console-auth-no-antigravity',
       },
     },
     projects: {},

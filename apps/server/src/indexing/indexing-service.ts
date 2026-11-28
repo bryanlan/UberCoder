@@ -52,6 +52,10 @@ export function getProviderTranscriptWatchPaths(providerId: ProviderId, discover
   }
   if (providerId === 'grok') return [path.join(discoveryRoot, 'sessions')];
   if (providerId === 'vibe') return [path.join(discoveryRoot, 'logs', 'session', 'unified')];
+  if (providerId === 'antigravity') return [
+    path.join(discoveryRoot, 'brain'),
+    path.join(discoveryRoot, 'cache', 'conversation_metadata.json'),
+  ];
 
   return [
     path.join(discoveryRoot, 'projects'),
@@ -73,8 +77,8 @@ export function getProviderTranscriptRefreshDelay(
 ): number | undefined {
   const shouldRefresh = eventName === 'add'
     || eventName === 'unlink'
-    || (providerId === 'claude' && eventName === 'change');
-  if (shouldRefresh && changedPath.endsWith('.jsonl')) {
+    || ((providerId === 'claude' || providerId === 'antigravity') && eventName === 'change');
+  if (shouldRefresh && (changedPath.endsWith('.jsonl') || (providerId === 'antigravity' && changedPath.endsWith('conversation_metadata.json')))) {
     return PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS;
   }
 
@@ -307,6 +311,7 @@ export class IndexingService {
           claude: { id: 'claude', label: 'Claude', conversations: [] },
           grok: { id: 'grok', label: 'Grok', conversations: [] },
           vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
+          antigravity: { id: 'antigravity', label: 'Antigravity', conversations: [] },
         },
       });
     }
@@ -352,6 +357,10 @@ export class IndexingService {
           vibe: {
             ...project.providers.vibe,
             conversations: project.providers.vibe.conversations.sort(compareConversationTreeOrder),
+          },
+          antigravity: {
+            ...project.providers.antigravity,
+            conversations: project.providers.antigravity.conversations.sort(compareConversationTreeOrder),
           },
         },
       }))

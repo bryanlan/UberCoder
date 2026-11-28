@@ -43,6 +43,7 @@ it.each([
         claude: { id: 'claude', label: 'Claude', conversations: [] },
         grok: { id: 'grok', label: 'Grok', conversations: [] },
         vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
+        antigravity: { id: 'antigravity', label: 'Antigravity', conversations: [] },
       },
     }],
   };
@@ -120,6 +121,7 @@ it.each(cases)('preserves $color for a $marker session with a $hours-hour-old re
         claude: { id: 'claude', label: 'Claude', conversations: [] },
         grok: { id: 'grok', label: 'Grok', conversations: [] },
         vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
+        antigravity: { id: 'antigravity', label: 'Antigravity', conversations: [] },
       },
     }],
   };
@@ -162,6 +164,7 @@ describe('New Chat options', () => {
           claude: { id: 'claude', label: 'Claude', conversations: [] },
           grok: { id: 'grok', label: 'Grok', conversations: [] },
           vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
+          antigravity: { id: 'antigravity', label: 'Antigravity', conversations: [] },
         },
       }],
     };
@@ -246,6 +249,14 @@ describe('New Chat options', () => {
     expect(onNewConversation).toHaveBeenLastCalledWith('demo', 'vibe');
   });
 
+  it('offers a new Antigravity conversation from the project menu only when the tree advertises antigravity', async () => {
+    const onNewConversation = renderSidebar(treeWithProject(['codex', 'claude', 'antigravity']));
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Project actions for Demo' }));
+    await user.click(screen.getByRole('button', { name: 'New Antigravity conversation' }));
+    expect(onNewConversation).toHaveBeenLastCalledWith('demo', 'antigravity');
+  });
+
   it('adds Grok to the mobile new-chat picker when its lane is on', async () => {
     vi.stubGlobal('matchMedia', (query: string) => ({
       matches: true, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn(),
@@ -320,6 +331,7 @@ it('shows agent-launched chats without an Agent controlled filter', async () => 
         claude: { id: 'claude', label: 'Claude', conversations: [] },
         grok: { id: 'grok', label: 'Grok', conversations: [] },
         vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
+        antigravity: { id: 'antigravity', label: 'Antigravity', conversations: [] },
       },
     }],
   };
@@ -363,6 +375,7 @@ describe('Start (provider-neutral new chat)', () => {
           claude: { id: 'claude', label: 'Claude', conversations: [] },
           grok: { id: 'grok', label: 'Grok', conversations: [] },
           vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
+          antigravity: { id: 'antigravity', label: 'Antigravity', conversations: [] },
         },
       }],
     };
@@ -402,7 +415,7 @@ describe('Start (provider-neutral new chat)', () => {
 
   it.each([
     ['one provider is enabled', ['grok'] as TreeResponse['structuredProviders'], true],
-    ['every provider is enabled', ['codex', 'claude', 'grok', 'vibe'] as TreeResponse['structuredProviders'], true],
+    ['every provider is enabled', ['codex', 'claude', 'grok', 'vibe', 'antigravity'] as TreeResponse['structuredProviders'], true],
     ['the list is empty', [] as TreeResponse['structuredProviders'], false],
   ])('shows or hides Start correctly when %s', async (_name, structuredProviders, shown) => {
     render(sidebarElement(treeWith(structuredProviders)));
@@ -440,6 +453,7 @@ describe('Start (provider-neutral new chat)', () => {
       claude: { routerProvider: 'anthropic', levels: { ultra: entry('Claude Fable 5.1'), medium: entry('Claude Sonnet 5.5') } },
       grok: { routerProvider: 'xai', levels: { medium: entry('Grok 4.7') } },
       vibe: { routerProvider: 'mistral', levels: {} },
+      antigravity: { routerProvider: 'google', levels: {} },
     } };
     render(sidebarElement(treeWith(['codex', 'claude']), { onStartConversation, modelProfiles }));
     const user = userEvent.setup();

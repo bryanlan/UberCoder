@@ -3,6 +3,7 @@ import { ClaudeProvider } from './claude-provider.js';
 import { CodexProvider } from './codex-provider.js';
 import { GrokProvider } from './grok-provider.js';
 import { VibeProvider, type VibeProviderLog } from './vibe-provider.js';
+import { AntigravityProvider } from './antigravity-provider.js';
 import type { ProviderAdapter, TranscriptParseCache } from './types.js';
 
 export class ProviderRegistry {
@@ -14,6 +15,7 @@ export class ProviderRegistry {
       claude: new ClaudeProvider(parseCache),
       grok: new GrokProvider(parseCache),
       vibe: new VibeProvider(parseCache, log),
+      antigravity: new AntigravityProvider(parseCache, log),
     };
   }
 

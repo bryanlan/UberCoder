@@ -5,7 +5,7 @@ import type { FixedModelProfileKey, ProviderId } from '@agent-console/shared';
 // module through tsx, whose tsconfig path maps that package to its type declarations, so a value import
 // arrives undefined. These tuples mirror the provider ids and the fixed profile keys the Start default names,
 // and are type-checked against the shared types.
-const PROVIDER_VALUES = ['codex', 'claude', 'grok', 'vibe'] as const satisfies readonly ProviderId[];
+const PROVIDER_VALUES = ['codex', 'claude', 'grok', 'vibe', 'antigravity'] as const satisfies readonly ProviderId[];
 const FIXED_PROFILE_VALUES = ['ultra', 'high', 'medium', 'low'] as const satisfies readonly FixedModelProfileKey[];
 
 const portSchema = z.number().int().min(1).max(65535);
@@ -52,6 +52,7 @@ export const projectConfigSchema = z.object({
     claude: providerOverrideSchema.optional(),
     grok: providerOverrideSchema.optional(),
     vibe: providerOverrideSchema.optional(),
+    antigravity: providerOverrideSchema.optional(),
   }).default({}),
 });
 
@@ -93,12 +94,19 @@ function structuredProviderSchema(defaultCommand: readonly string[]) {
   });
 }
 
-const STRUCTURED_PROVIDER_DEFAULT_COMMANDS = { codex: ['codex', 'app-server'], claude: ['claude'], grok: ['grok'], vibe: ['vibe-acp'] } as const;
+const STRUCTURED_PROVIDER_DEFAULT_COMMANDS = {
+  codex: ['codex', 'app-server'],
+  claude: ['claude'],
+  grok: ['grok'],
+  vibe: ['vibe-acp'],
+  antigravity: ['agy', 'acp', '--stdio', '--dangerously-skip-permissions'],
+} as const;
 const codexStructuredSchema = structuredProviderSchema(STRUCTURED_PROVIDER_DEFAULT_COMMANDS.codex);
 const claudeStructuredSchema = structuredProviderSchema(STRUCTURED_PROVIDER_DEFAULT_COMMANDS.claude);
 // With its lane off, Grok is not offered at all: no history and no new chats.
 const grokStructuredSchema = structuredProviderSchema(STRUCTURED_PROVIDER_DEFAULT_COMMANDS.grok);
 const vibeStructuredSchema = structuredProviderSchema(STRUCTURED_PROVIDER_DEFAULT_COMMANDS.vibe);
+const antigravityStructuredSchema = structuredProviderSchema(STRUCTURED_PROVIDER_DEFAULT_COMMANDS.antigravity);
 
 /** One provider's structured-session settings. The host service and the provider's transport plugin both take this shape. */
 export type StructuredProviderConfig = z.output<typeof codexStructuredSchema>;
@@ -107,6 +115,7 @@ export function defaultStructuredProviderConfig(provider: keyof typeof STRUCTURE
   const schema = provider === 'claude' ? claudeStructuredSchema
     : provider === 'grok' ? grokStructuredSchema
     : provider === 'vibe' ? vibeStructuredSchema
+    : provider === 'antigravity' ? antigravityStructuredSchema
     : codexStructuredSchema;
   return schema.parse({});
 }
@@ -118,11 +127,13 @@ const structuredSessionsConfigSchema = z.preprocess(rejectRemovedKeys({
   claude: claudeStructuredSchema.default(() => defaultStructuredProviderConfig('claude')),
   grok: grokStructuredSchema.default(() => defaultStructuredProviderConfig('grok')),
   vibe: vibeStructuredSchema.default(() => defaultStructuredProviderConfig('vibe')),
+  antigravity: antigravityStructuredSchema.default(() => defaultStructuredProviderConfig('antigravity')),
 })).default(() => ({
   codex: defaultStructuredProviderConfig('codex'),
   claude: defaultStructuredProviderConfig('claude'),
   grok: defaultStructuredProviderConfig('grok'),
   vibe: defaultStructuredProviderConfig('vibe'),
+  antigravity: defaultStructuredProviderConfig('antigravity'),
 }));
 
 export const appConfigSchema = z.object({
@@ -178,6 +189,8 @@ export const appConfigSchema = z.object({
     grok: providerSettingsSchema.default({ enabled: true, discoveryRoot: '~/.grok' }),
     // `discoveryRoot` is where Vibe keeps its unified session store (`logs/session/unified`).
     vibe: providerSettingsSchema.default({ enabled: true, discoveryRoot: '~/.vibe' }),
+    // `discoveryRoot` is where Antigravity CLI keeps its conversation metadata and brain transcripts.
+    antigravity: providerSettingsSchema.default({ enabled: true, discoveryRoot: '~/.gemini/antigravity-cli' }),
   }),
   projects: z.record(z.string(), projectConfigSchema).default({}),
 });

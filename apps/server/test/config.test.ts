@@ -385,7 +385,8 @@ describe('ConfigService', () => {
     const claudeDefaults = { enabled: true, command: ['claude'], idleUnloadMinutes: 60, env: {} };
     const grokDefaults = { enabled: true, command: ['grok'], idleUnloadMinutes: 60, env: {} };
     const vibeDefaults = { enabled: true, command: ['vibe-acp'], idleUnloadMinutes: 60, env: {} };
-    const defaults = { codex: codexDefaults, claude: claudeDefaults, grok: grokDefaults, vibe: vibeDefaults };
+    const antigravityDefaults = { enabled: true, command: ['agy', 'acp', '--stdio', '--dangerously-skip-permissions'], idleUnloadMinutes: 60, env: {} };
+    const defaults = { codex: codexDefaults, claude: claudeDefaults, grok: grokDefaults, vibe: vibeDefaults, antigravity: antigravityDefaults };
 
     it('defaults to enabled when the block is absent or partial', async () => {
       const absent = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security });
@@ -414,6 +415,7 @@ describe('ConfigService', () => {
         expect(defaultStructuredProviderConfig('codex')).toEqual(codexDefaults);
         expect(defaultStructuredProviderConfig('grok')).toEqual(grokDefaults);
         expect(defaultStructuredProviderConfig('vibe')).toEqual(vibeDefaults);
+        expect(defaultStructuredProviderConfig('antigravity')).toEqual(antigravityDefaults);
       } finally {
         for (const configPath of [first, second]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
       }
@@ -423,8 +425,8 @@ describe('ConfigService', () => {
       const codexOff = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: { enabled: false } } });
       const claudeOff = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { claude: { enabled: false } } });
       try {
-        expect(new ConfigService(codexOff).getConfig().structuredSessions).toEqual({ codex: { ...codexDefaults, enabled: false }, claude: claudeDefaults, grok: grokDefaults, vibe: vibeDefaults });
-        expect(new ConfigService(claudeOff).getConfig().structuredSessions).toEqual({ codex: codexDefaults, claude: { ...claudeDefaults, enabled: false }, grok: grokDefaults, vibe: vibeDefaults });
+        expect(new ConfigService(codexOff).getConfig().structuredSessions).toEqual({ codex: { ...codexDefaults, enabled: false }, claude: claudeDefaults, grok: grokDefaults, vibe: vibeDefaults, antigravity: antigravityDefaults });
+        expect(new ConfigService(claudeOff).getConfig().structuredSessions).toEqual({ codex: codexDefaults, claude: { ...claudeDefaults, enabled: false }, grok: grokDefaults, vibe: vibeDefaults, antigravity: antigravityDefaults });
       } finally {
         for (const configPath of [codexOff, claudeOff]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
       }
@@ -445,12 +447,14 @@ describe('ConfigService', () => {
           claude: { enabled: true, command: ['/opt/claude/bin/claude', '--debug'], idleUnloadMinutes: 20, env: { CLAUDE_CONFIG_DIR: '~/alt-claude' } },
           grok: grokDefaults,
           vibe: vibeDefaults,
+          antigravity: antigravityDefaults,
         });
         expect(new ConfigService(enabledOnly).getConfig().structuredSessions).toEqual({
           codex: { ...codexDefaults, enabled: true },
           claude: { ...claudeDefaults, enabled: true },
           grok: grokDefaults,
           vibe: vibeDefaults,
+          antigravity: antigravityDefaults,
         });
         for (const configPath of [invalid, invalidClaude, invalidIdle, invalidEnv]) expect(() => new ConfigService(configPath)).toThrow();
       } finally {
@@ -464,6 +468,7 @@ describe('ConfigService', () => {
         claude: { enabled: true, command: ['claude', '--debug'], idleUnloadMinutes: 7, env: { OTHER: '2' } },
         grok: { enabled: true, command: ['grok'], idleUnloadMinutes: 9, env: { GROK_HOME: '~/.grok-alt' } },
         vibe: { enabled: true, command: ['vibe-acp'], idleUnloadMinutes: 11, env: { VIBE_HOME: '~/.vibe-alt' } },
+        antigravity: { enabled: true, command: ['agy', 'acp', '--stdio', '--dangerously-skip-permissions'], idleUnloadMinutes: 13, env: { ANTIGRAVITY_DATA_DIR: '~/.agy-alt' } },
       };
       const configPath = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: block });
       try {
